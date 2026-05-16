@@ -1,0 +1,10 @@
+{
+  "intents": [
+    "ask_info",
+    "ask_property",
+    "ask_feature",
+    "compare",
+    "brand",
+    "recommend"
+  ]
+}

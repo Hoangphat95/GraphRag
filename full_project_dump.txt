@@ -1,0 +1,2688 @@
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\api\app.py
+================================================================================
+
+# api/app.py
+from fastapi import FastAPI
+from pipeline.rag_pipeline import RAGPipeline
+
+app = FastAPI()
+pipeline = RAGPipeline()
+
+@app.get("/query")
+def query(q: str):
+    return {"result": pipeline.run(q)}
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\config\settings.py
+================================================================================
+
+NEO4J_URI = "neo4j://127.0.0.1:7687"
+NEO4J_USER = "neo4j"
+NEO4J_PASSWORD = "tiredrc2026"
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\core\context_manager.py
+================================================================================
+
+# core/context_manager.py
+class ContextManager:
+    def __init__(self):
+        self.memory = []
+
+    def add(self, query, result):
+        self.memory.append((query, result))
+
+    def get_context(self):
+        return self.memory[-3:]
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\core\orchestrator.py
+================================================================================
+
+# core/orchestrator.py
+import asyncio
+
+class Orchestrator:
+    def __init__(self, pipeline):
+        self.pipeline = pipeline
+
+    async def run(self, query):
+        return await asyncio.to_thread(self.pipeline.run, query)
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\core\retry.py
+================================================================================
+
+# core/retry.py
+import time
+
+def retry(func, retries=3):
+    for i in range(retries):
+        try:
+            return func()
+        except Exception:
+            time.sleep(0.5)
+    return None
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\core\router.py
+================================================================================
+
+from router.ml_router import MLRouter
+from router.intent_model import IntentModel
+
+
+class QueryRouter:
+
+    def __init__(self):
+        self.ml = MLRouter()
+
+        # 🔥 FIX: tránh crash nếu model lỗi
+        try:
+            self.intent_model = IntentModel()
+            self.use_intent_model = True
+        except Exception as e:
+            print(f"[Router] IntentModel disabled: {e}")
+            self.use_intent_model = False
+
+        # 🔥 giảm threshold để ML có cơ hội học
+        self.conf_threshold = 0.6
+
+    def route(self, query: str, mapped):
+        q = query.lower()
+
+        # ======================
+        # FEATURE ENGINEERING
+        # ======================
+        has_size = any(r.get("type") in ["exact", "size_fallback"] for r in mapped)
+        has_property = any(r.get("type") == "column_detect" for r in mapped)
+
+        size_count = sum(
+            1 for r in mapped if r.get("type") in ["exact", "size_fallback"]
+        )
+
+        # ======================
+        # 🔥 HARD RULE (GIẢM ĐỘ MẠNH)
+        # ======================
+
+        # Rule chỉ áp dụng khi cực kỳ rõ
+        if has_size and has_property and size_count == 1:
+            print("[Router] HARD RULE → RULE")
+            return "RULE"
+
+        # Nhiều size → LLM
+        if size_count > 1:
+            print("[Router] MULTI SIZE → LLM")
+            return "LLM"
+
+        # ======================
+        # 🔥 KEYWORD HEURISTIC (NHẸ)
+        # ======================
+        if any(k in q for k in [
+            "so sánh", "khác nhau", "tốt hơn",
+            "bền không", "ổn không", "đánh giá",
+            "nên chọn", "loại nào"
+        ]):
+            print("[Router] KEYWORD → LLM")
+            return "LLM"
+
+        # ======================
+        # 🔥 INTENT MODEL (SAFE)
+        # ======================
+        if self.use_intent_model:
+            try:
+                intent, confidence = self.intent_model.predict(query)
+
+                print(f"[IntentModel] intent={intent} | confidence={confidence:.2f}")
+
+                if confidence >= self.conf_threshold:
+                    print("[Router] IntentModel accepted")
+                    return intent
+                else:
+                    print("[Router] IntentModel low confidence → fallback")
+            except Exception as e:
+                print(f"[Router] IntentModel error: {e}")
+
+        # ======================
+        # 🔥 ML ROUTER FALLBACK
+        # ======================
+        try:
+            ml_pred = self.ml.predict(query)
+            print(f"[MLRouter] predict={ml_pred}")
+            return ml_pred
+        except Exception as e:
+            print(f"[Router] MLRouter error: {e}")
+
+        # ======================
+        # 🔥 FINAL FALLBACK
+        # ======================
+        print("[Router] FINAL FALLBACK → LLM")
+        return "LLM"
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\cypher\cypher_builder.py
+================================================================================
+
+import os
+import json
+from typing import List, Dict
+from cypher.property_normalizer import PropertyNormalizer
+
+
+class CypherBuilder:
+
+    def __init__(self, schema_path="graph_schema.json"):
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        schema_path = os.path.join(BASE_DIR, "graph_schema.json")
+
+        with open(schema_path, "r", encoding="utf-8") as f:
+            self.schema = json.load(f)
+
+        self.properties = self.schema["properties"]
+        self.normalizer = PropertyNormalizer(self.properties)
+
+        self.prop_to_node = {
+            p: node
+            for node, props in self.properties.items()
+            for p in props
+        }
+
+        self.valid_props = {
+            p for props in self.properties.values() for p in props
+        }
+
+        self.property_keywords = {
+            "tốc độ": "toc_do_toi_da",
+            "tốc độ tối đa": "toc_do_toi_da",
+            "chịu tải": "tai_trong_lon_nhat",
+            "tải": "tai_trong_lon_nhat",
+            "áp suất": "noi_ap_tieu_chuan",
+            "rim": "duong_kinh_vanh",
+            "đường kính vành": "duong_kinh_vanh",
+            "vành": "duong_kinh_vanh",
+            "đường kính ngoài": "duong_kinh_ngoai",
+            "ngoài": "duong_kinh_ngoai",
+            "pattern": "kieu_hoa",
+            "hoa": "kieu_hoa"
+        }
+
+    # ======================
+    def detect_intent(self, mapped, query):
+        q = query.lower()
+
+        has_property = any(r.get("type") == "column_detect" for r in mapped)
+        has_size = any(r.get("type") in ["exact", "size_fallback"] for r in mapped)
+
+        if "ruột" in q or "tube" in q:
+            return "TUBE_QUERY"
+
+        if "hãng" in q:
+            return "BRAND_QUERY"
+
+        if "công ty" in q:
+            return "COMPANY_QUERY"
+
+        if "tiêu chuẩn" in q:
+            return "STANDARD_QUERY"
+        
+        if "pattern" in q or "hoa" in q:
+            return "PATTERN_QUERY"
+
+        if any(k in q for k in ["thông số", "thông tin", "chi tiết", "spec"]):
+            return "FULL_INFO_QUERY"
+
+        if has_property and has_size:
+            return "PROPERTY_QUERY"
+
+        if has_size:
+            return "SIZE_QUERY"
+
+        if has_property:
+            return "PROPERTY_ONLY_QUERY"
+
+        return "GENERAL_QUERY"
+
+    # ======================
+    def build(self, mapped_results: List[Dict], query: str):
+
+        intent = self.detect_intent(mapped_results, query)
+
+        size_value = None
+        target_property = None
+
+        # ======================
+        # extract
+        # ======================
+        for r in mapped_results:
+
+            if r.get("type") in ["exact", "size_fallback"]:
+                if r.get("column") == "Giá trị quy cách":
+                    size_value = r.get("value")
+
+            if r.get("type") == "column_detect":
+                target_property = self.normalizer.get_real_property(r.get("column"))
+
+        # ======================
+        # PRIORITY RULE (fix sai semantic)
+        # ======================
+        q = query.lower()
+
+        if "đường kính vành" in q:
+            target_property = "duong_kinh_vanh"
+
+        elif "đường kính ngoài" in q:
+            target_property = "duong_kinh_ngoai"
+
+        # ======================
+        # extract semantic (chỉ khi chưa có)
+        # ======================
+        if not target_property:
+            for r in mapped_results:
+                if r.get("type") == "column_detect":
+                    target_property = self.normalizer.get_real_property(r.get("column"))
+
+        # ======================
+        # fallback keyword
+        # ======================
+        if not target_property:
+            for k, v in sorted(self.property_keywords.items(), key=lambda x: -len(x[0])):
+                if k in q:
+                    target_property = v
+                    break
+
+        # ======================
+        # SAFE CHECK
+        # ======================
+        if target_property and target_property not in self.valid_props:
+            raise ValueError(f"Invalid property: {target_property}")
+
+        # ======================
+        # PATTERN
+        # ======================
+        if intent == "PATTERN_QUERY":
+
+            if size_value:
+                return f"""
+                MATCH (t:Tire)-[:CÓ_HOA]->(p:TirePattern)
+                WHERE t.size = "{size_value}"
+                RETURN COLLECT(DISTINCT p.pattern) AS result
+                LIMIT 1
+                """
+
+            return """
+            MATCH (t:Tire)-[:CÓ_HOA]->(p:TirePattern)
+            RETURN COLLECT(DISTINCT p.pattern) AS result
+            LIMIT 1
+            """
+
+        # ======================
+        # SIZE QUERY
+        # ======================
+        if intent == "SIZE_QUERY":
+
+            if not size_value:
+                return """
+                MATCH (t:Tire)
+                RETURN DISTINCT t.size AS result
+                LIMIT 20
+                """
+
+            if target_property:
+                return f"""
+                MATCH (t:Tire)
+                WHERE t.size = "{size_value}"
+                RETURN t.{target_property} AS result
+                LIMIT 1
+                """
+
+            return f"""
+            MATCH (t:Tire)
+            WHERE t.size = "{size_value}"
+            RETURN 
+                t.toc_do_toi_da AS speed,
+                t.tai_trong_lon_nhat AS load,
+                t.noi_ap_tieu_chuan AS pressure
+            LIMIT 1
+            """
+
+        # ======================
+        # PROPERTY QUERY
+        # ======================
+        if intent == "PROPERTY_QUERY" and target_property:
+
+            q = "MATCH (t:Tire)\n"
+
+            if size_value:
+                q += f'WHERE t.size = "{size_value}"\n'
+
+            q += f"RETURN t.{target_property} AS result LIMIT 1"
+            return q
+
+        # ======================
+        # PROPERTY ONLY
+        # ======================
+        if intent == "PROPERTY_ONLY_QUERY":
+
+            if not target_property:
+                return """
+                MATCH (t:Tire)
+                RETURN t.size AS result
+                LIMIT 10
+                """
+
+            if size_value:
+                return f"""
+                MATCH (t:Tire)
+                WHERE t.size = "{size_value}"
+                RETURN t.{target_property} AS result
+                LIMIT 1
+                """
+
+            return f"""
+            MATCH (t:Tire)
+            RETURN DISTINCT t.{target_property} AS result
+            LIMIT 20
+            """
+
+        # ======================
+        # BRAND
+        # ======================
+        if intent in ["BRAND_QUERY", "COMPANY_QUERY"] and size_value:
+            return f"""
+            MATCH (t:Tire)
+            WHERE t.size = "{size_value}"
+            RETURN t.brand AS result
+            LIMIT 1
+            """
+
+        # ======================
+        # FULL INFO (FINAL CLEAN)
+        # ======================
+        if intent == "FULL_INFO_QUERY" and size_value:
+            return f"""
+            MATCH (t:Tire)
+            WHERE t.size = "{size_value}"
+
+            OPTIONAL MATCH (t)-[:CÓ_HOA]->(p:TirePattern)
+
+            WITH t, COLLECT(DISTINCT p.pattern) AS patterns
+
+            RETURN 
+                t.size AS size,
+                t.brand AS brand,
+                t.toc_do_toi_da AS max_speed,
+                t.tai_trong_lon_nhat AS max_load,
+                t.noi_ap_tieu_chuan AS pressure,
+                t.duong_kinh_ngoai AS diameter,
+                t.duong_kinh_vanh AS rim,
+                t.chieu_rong_toan_bo AS width,
+                t.chieu_sau_hoa AS tread_depth,
+                t.rong_vanh_tieu_chuan AS std_rim,
+                t.rong_vanh_thich_hop AS fit_rim,
+                t.so_lop_bo AS ply_rating,
+                t.chi_so_tai_toc_do AS load_speed_index,
+                t.phan_loai_tai AS load_type,
+                t.nhom_lop AS category,
+                t.vehicle_type AS vehicle,
+                t.kieu_quy_cach AS spec_type,
+                t.cau_truc_lop AS structure,
+                CASE 
+                    WHEN t.co_sam = true THEN "Có săm"
+                    ELSE "Không săm"
+                END AS tube_type,
+                patterns AS pattern
+            LIMIT 1
+            """
+
+        # ======================
+        # TUBE QUERY (FINAL)
+        # ======================
+        if intent == "TUBE_QUERY":
+
+            if not size_value:
+                return """
+                MATCH (t:Tire)
+                OPTIONAL MATCH (tu:Tube)-[:DÙNG_CHO]->(t)
+                RETURN DISTINCT t.size,
+                    CASE 
+                        WHEN t.co_sam = false THEN "Lốp không săm"
+                        WHEN tu.vehicle_type IS NULL THEN "Lốp có săm"
+                        ELSE "Lốp có săm: " + tu.vehicle_type
+                    END AS result
+                LIMIT 20
+                """
+
+            return f"""
+            MATCH (t:Tire)
+            WHERE t.size = "{size_value}"
+            OPTIONAL MATCH (tu:Tube)-[:DÙNG_CHO]->(t)
+            RETURN 
+                CASE 
+                    WHEN t.co_sam = false THEN "Lốp không săm"
+                    WHEN tu.vehicle_type IS NULL THEN "Lốp có săm"
+                    ELSE "Lốp có săm: " + tu.vehicle_type
+                END AS result
+            LIMIT 1
+            """
+
+        # ======================
+        # DEFAULT
+        # ======================
+        return """
+        MATCH (t:Tire)
+        RETURN t.size AS result
+        LIMIT 10
+        """
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\cypher\cypher_generator.py
+================================================================================
+
+import os
+from llm.llm_client import LLMClient
+from llm.prompt_cypher import build_cypher_prompt
+import json
+
+
+class CypherGenerator:
+    def __init__(self):
+        self.llm = LLMClient(model_name="models/gemini-3.1-flash-lite-preview")
+
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        schema_path = os.path.join(BASE_DIR, "graph_schema.json")
+
+        with open(schema_path, "r", encoding="utf-8") as f:
+            self.schema = json.load(f)
+
+    def generate(self, query: str):
+        prompt = build_cypher_prompt(query, self.schema)
+
+        print("\n===== CYPHER PROMPT =====")
+        print(prompt)
+
+        cypher = self.llm.chat(prompt)
+
+        print("\n===== RAW LLM CYPHER =====")
+        print(cypher)
+
+        if not cypher:
+            print("⚠️ LLM trả về rỗng → sẽ fallback")
+
+        # clean
+        cypher = cypher.replace("```cypher", "").replace("```", "").strip()
+
+        print("\n===== CLEAN CYPHER =====")
+        print(cypher)
+
+        return cypher
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\cypher\cypher_parser.py
+================================================================================
+
+# cypher/cypher_parser.py
+import re
+
+def extract_nodes(cypher):
+    return re.findall(r"\((\w+):(\w+)\)", cypher)
+
+def extract_relationships(cypher):
+    return re.findall(r"\[:(\w+)\]", cypher)
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\cypher\graph_schema.json
+================================================================================
+
+{
+  "nodes": [
+    "Tire",
+    "TirePattern",
+    "QualityStandard",
+    "TireType",
+    "Tube",
+    "Brand",
+    "Van",
+    "Company"
+  ],
+  "relationships": [
+    "CÓ_HOA",
+    "THUỘC_NHÓM",
+    "DÙNG_CHO",
+    "CÓ_BIẾN_THỂ",
+    "ĐẠT_CHUẨN",
+    "SẢN_XUẤT_SĂM",
+    "DÙNG_VAN",
+    "CO_SP"
+  ],
+  "properties": {
+    "Tire": [
+      "kieu_quy_cach",
+      "duong_kinh_ngoai",
+      "co_sam",
+      "tai_trong_lon_nhat",
+      "chieu_rong_vanh",
+      "gia_nhap_chua_vat",
+      "toc_do_toi_da",
+      "vehicle_type",
+      "gia_nhap_co_vat",
+      "kieu_hoa",
+      "loai_xe_dap",
+      "so_lop_bo",
+      "duong_kinh_vanh",
+      "rong_vanh_thich_hop",
+      "nhom_lop",
+      "phan_loai_tai",
+      "gia_ban_co_vat",
+      "gia_ban_chua_vat",
+      "vanh",
+      "chieu_rong_toan_bo",
+      "chi_so_tai_toc_do",
+      "cau_truc_lop",
+      "noi_ap_tieu_chuan",
+      "dong_series",
+      "size",
+      "chieu_sau_hoa",
+      "brand",
+      "rong_vanh_tieu_chuan"
+    ],
+    "TirePattern": [
+      "pattern"
+    ],
+    "TireType": [
+      "name"
+    ],
+    "Tube": [
+      "vehicle_type",
+      "chieu_day_gap_doi",
+      "kieu_quy_cach",
+      "size",
+      "chieu_rong_gap_doi"
+    ],
+    "QualityStandard": [
+      "name"
+    ],
+    "Brand": [
+      "name"
+    ],
+    "Van": [
+      "name"
+    ],
+    "Company": [
+      "name"
+    ]
+  },
+  "graph": [
+    {
+      "from": "Tire",
+      "rel": "CÓ_HOA",
+      "to": "TirePattern"
+    },
+    {
+      "from": "Tire",
+      "rel": "THUỘC_NHÓM",
+      "to": "TireType"
+    },
+    {
+      "from": "Tire",
+      "rel": "CÓ_BIẾN_THỂ",
+      "to": "TirePattern"
+    },
+    {
+      "from": "Tire",
+      "rel": "ĐẠT_CHUẨN",
+      "to": "QualityStandard"
+    },
+    {
+      "from": "Tube",
+      "rel": "DÙNG_VAN",
+      "to": "Van"
+    },
+    {
+      "from": "Tube",
+      "rel": "DÙNG_CHO",
+      "to": "Tire"
+    },
+    {
+      "from": "Brand",
+      "rel": "SẢN_XUẤT_SĂM",
+      "to": "Tube"
+    },
+    {
+      "from": "Company",
+      "rel": "CO_SP",
+      "to": "Tire"
+    }
+  ]
+}
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\cypher\property_normalizer.py
+================================================================================
+
+import unicodedata
+
+
+class PropertyNormalizer:
+
+    def __init__(self, properties: dict):
+
+        self.raw_to_clean = {}
+        self.clean_to_raw = {}
+
+        for node, props in properties.items():
+            for p in props:
+                clean = self.normalize(p)
+
+                self.raw_to_clean[p] = clean
+                self.clean_to_raw[clean] = p
+
+    # remove accent + normalize
+    def normalize(self, text: str):
+        import unicodedata
+
+        text = text.lower()
+
+        text = unicodedata.normalize('NFD', text)
+        text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+
+        text = text.replace("đ", "d")
+        text = text.replace(" ", "_")
+
+        return text
+
+    def get_real_property(self, detected_column: str):
+        return self.clean_to_raw.get(detected_column, None)
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\cypher\value_mapper.py
+================================================================================
+
+# app/value_mapper.py
+
+import numpy as np
+import re
+from mapper.embeddings import embed_text
+from mapper.value_store import ValueStore, normalize_text
+
+
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+
+def find_exact_match(candidate: str, data):
+    candidate_norm = normalize_text(candidate)
+
+    for item in data:
+        if candidate_norm == item["value"]:
+            return item
+    return None
+
+
+def find_best_column(query_part: str, columns):
+
+    # 🔥 RULE BASED
+    rule_map = {
+    "tốc độ tối đa": "toc_do_toi_da",
+    "tốc độ": "toc_do_toi_da",
+
+    "chịu tải": "tai_trong_lon_nhat",
+    "tải": "tai_trong_lon_nhat",
+
+    "áp suất": "noi_ap_tieu_chuan",
+
+    "rim": "duong_kinh_vanh",
+    "đường kính vành": "duong_kinh_vanh",
+    "vành": "duong_kinh_vanh",
+
+    "đường kính ngoài": "duong_kinh_ngoai",
+
+    "pattern": "kieu_hoa",
+    "hoa": "kieu_hoa"
+}
+
+    for k, v in rule_map.items():
+        if k in query_part:
+            for col in columns:
+                if col["column"] == v:
+                    return col, 1.0
+
+    # 🔥 EMBEDDING FALLBACK
+    emb = embed_text(query_part)
+
+    best = None
+    best_score = -1
+
+    for col in columns:
+        sim = cosine_similarity(emb, col["embedding"])
+
+        if sim > best_score:
+            best_score = sim
+            best = col
+
+    if best_score < 0.6:
+        return None, best_score
+
+    return best, best_score
+
+
+def clean_text(text: str):
+    stopwords = [
+        "lốp", "tire", "của", "là", "bao nhiêu",
+        "là gì", "có", "thuộc", "gì", "là bao nhiêu",
+        "cho", "với"
+    ]
+
+    for w in stopwords:
+        text = text.replace(w, "")
+
+    return text.strip()
+
+
+def extract_candidates(query: str):
+    query = query.lower()
+
+    size_pattern = r"\b\d+(?:\.\d+)?(?:[xX/\\-]\d+(?:\.\d+)?)+\b"
+    sizes = re.findall(size_pattern, query)
+
+    text_part = re.sub(size_pattern, "", query)
+    text_part = clean_text(text_part)
+
+    candidates = sizes
+
+    if text_part:
+        candidates.append(text_part)
+
+    return candidates
+
+
+class ValueMapper:
+    def __init__(self):
+        self.store = ValueStore()
+        self.store.build()
+
+    def map_query(self, query: str):
+        candidates = extract_candidates(query)
+
+        results = []
+
+        for c in candidates:
+
+            # 🔥 1. EXACT MATCH
+            exact = find_exact_match(c, self.store.data)
+
+            if exact:
+                results.append({
+                    "query_part": c,
+                    "value": exact["raw_value"],  # 🔥 trả raw
+                    "column": exact["column"],
+                    "score": 1.0,
+                    "type": "exact"
+                })
+                continue
+            
+            if re.match(r"\d", c):
+                results.append({
+                    "query_part": c,
+                    "value": c,
+                    "column": "Giá trị quy cách",
+                    "score": 0.5,
+                    "type": "size_fallback"
+                })
+                continue
+
+            # 🔥 2. COLUMN DETECT
+            best_col, col_score = find_best_column(c, self.store.columns)
+
+            if best_col:
+                results.append({
+                    "query_part": c,
+                    "column": self.normalize_column(best_col["column"]),
+                    "score": col_score,
+                    "type": "column_detect"
+                })
+
+        return results
+    
+    def normalize_column(self, col):
+        import unicodedata
+
+        col = col.lower()
+
+        # remove accents chuẩn
+        col = unicodedata.normalize('NFD', col)
+        col = ''.join(c for c in col if unicodedata.category(c) != 'Mn')
+
+        # fix special cases
+        col = col.replace("&", "and")
+        col = col.replace("đ", "d")
+        col = col.replace(" ", "_")
+
+        return col
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\db\kg_loader.py
+================================================================================
+
+# db/kg_loader.py
+
+from db.neo4j_client import Neo4jClient
+from functools import lru_cache
+
+
+class KGLoader:
+    def __init__(self):
+        self.client = Neo4jClient()
+
+    # =========================
+    # LOAD ALL SIZES
+    # =========================
+    @lru_cache(maxsize=1)
+    def get_all_sizes(self):
+        query = """
+        MATCH (t:Tire)
+        WHERE t.size IS NOT NULL
+        RETURN DISTINCT t.size AS size
+        """
+        result = self.client.query(query)
+        return [r["size"] for r in result if r["size"]]
+
+    # =========================
+    # LOAD ALL BRANDS
+    # =========================
+    @lru_cache(maxsize=1)
+    def get_all_brands(self):
+        query = """
+        MATCH (t:Tire)
+        WHERE t.brand IS NOT NULL
+        RETURN DISTINCT t.brand AS brand
+        """
+        result = self.client.query(query)
+        return [r["brand"] for r in result if r["brand"]]
+
+    # =========================
+    # LOAD ALL TIRE TYPES
+    # =========================
+    @lru_cache(maxsize=1)
+    def get_all_types(self):
+        query = """
+        MATCH (t:Tire)-[:THUỘC_NHÓM]->(tt:TireType)
+        RETURN DISTINCT tt.name AS type
+        """
+        result = self.client.query(query)
+        return [r["type"] for r in result if r["type"]]
+
+    # =========================
+    # LOAD ALL PATTERNS
+    # =========================
+    @lru_cache(maxsize=1)
+    def get_all_patterns(self):
+        query = """
+        MATCH (t:Tire)-[:CÓ_HOA]->(tp:TirePattern)
+        RETURN DISTINCT tp.pattern AS pattern
+        """
+        result = self.client.query(query)
+        return [r["pattern"] for r in result if r["pattern"]]
+
+    # =========================
+    # LOAD ALL VEHICLE TYPES
+    # =========================
+    @lru_cache(maxsize=1)
+    def get_all_vehicle_types(self):
+        query = """
+        MATCH (t:Tire)
+        WHERE t.vehicle_type IS NOT NULL
+        RETURN DISTINCT t.vehicle_type AS vehicle
+        """
+        result = self.client.query(query)
+        return [r["vehicle"] for r in result if r["vehicle"]]
+
+    # =========================
+    # LOAD FULL CONTEXT (FOR TRAINING)
+    # =========================
+    def get_full_context(self):
+        return {
+            "sizes": self.get_all_sizes(),
+            "brands": self.get_all_brands(),
+            "types": self.get_all_types(),
+            "patterns": self.get_all_patterns(),
+            "vehicles": self.get_all_vehicle_types()
+        }
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\db\neo4j_client.py
+================================================================================
+
+from neo4j import GraphDatabase
+from config.settings import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
+
+
+class Neo4jClient:
+
+    def __init__(self):
+        self.driver = GraphDatabase.driver(
+            NEO4J_URI,
+            auth=(NEO4J_USER, NEO4J_PASSWORD)
+        )
+
+    def query(self, cypher: str):
+
+        print("\n===== EXECUTE CYPHER =====")
+        print(cypher)
+
+        with self.driver.session() as session:
+            result = session.run(cypher)
+            data = [r.data() for r in result]
+
+            print("\n===== RAW DB DATA =====")
+            print(data)
+
+            return data
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\db\query_cache.py
+================================================================================
+
+# db/query_cache.py
+import hashlib
+
+class QueryCache:
+    def __init__(self):
+        self.cache = {}
+
+    def get(self, query):
+        return self.cache.get(hash(query))
+
+    def set(self, query, result):
+        self.cache[hash(query)] = result
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\evaluation\eval_intent.py
+================================================================================
+
+import json
+from router.intent_model import IntentModel
+
+def evaluate():
+    model = IntentModel()
+
+    with open("training/dataset_train/intent_dataset.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    correct = 0
+
+    for item in data:
+        query = item["query"]
+        true_label = item["label"]
+
+        pred, conf = model.predict(query)
+
+        if pred == true_label:
+            correct += 1
+
+    accuracy = correct / len(data)
+
+    print(f"✅ Accuracy: {accuracy:.2f}")
+    print(f"✔ Correct: {correct}/{len(data)}")
+
+
+if __name__ == "__main__":
+    evaluate()
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\infra\logger.py
+================================================================================
+
+# infra/logger.py
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
+def log(msg):
+    logging.info(msg)
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\infra\metrics.py
+================================================================================
+
+import time
+
+
+class Metrics:
+
+    def __init__(self):
+        self.logs = []
+
+    def start_timer(self):
+        return time.time()
+
+    def end_timer(self, start_time):
+        return round(time.time() - start_time, 3)
+
+    def log(self, query, cypher, result, latency):
+
+        record = {
+            "query": query,
+            "cypher": cypher,
+            "result_count": len(result) if result else 0,
+            "latency": latency
+        }
+
+        self.logs.append(record)
+
+        # debug realtime
+        print("====== METRICS ======")
+        print(record)
+        print("=====================")
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\infra\tracing.py
+================================================================================
+
+# infra/tracing.py
+import time
+
+def trace(func):
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        res = func(*args, **kwargs)
+        print(f"[TRACE] {func.__name__}: {time.time()-start:.3f}s")
+        return res
+    return wrapper
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\llm\answer_generator.py
+================================================================================
+
+from llm.llm_client import LLMClient
+from llm.prompt_answer import build_answer_prompt
+
+
+class AnswerGenerator:
+
+    def __init__(self):
+        self.llm = LLMClient(model_name="models/gemini-3.1-flash-lite-preview")
+
+    def generate(self, query, data):
+        prompt = build_answer_prompt(query, data)
+
+        print("\n===== ANSWER PROMPT =====")
+        print(prompt)
+
+        answer = self.llm.chat(prompt)
+
+        print("\n===== RAW LLM ANSWER =====")
+        print(answer)
+
+        if not answer:
+            print("⚠️ LLM ANSWER RỖNG → fallback manual")
+
+            if data:
+                d = data[0]
+                return f"Dữ liệu: {d}"
+
+            return "Không tìm thấy dữ liệu."
+
+        return answer.strip()
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\llm\llm_client.py
+================================================================================
+
+import os
+from dotenv import load_dotenv
+from google import genai
+import time
+
+load_dotenv()
+
+
+class LLMClient:
+    def __init__(self, model_name=None, temperature=0.0, max_retries=2):
+        api_key = os.getenv("GEMINI_API_KEY")
+
+        if not api_key:
+            raise ValueError("❌ GEMINI_API_KEY not found")
+
+        self.client = genai.Client(api_key=api_key)
+
+        # 🔥 cho phép chọn model linh hoạt
+        self.model = model_name or "models/gemini-3.1-flash-lite-preview"
+
+        self.temperature = temperature
+        self.max_retries = max_retries
+
+    def chat(self, prompt: str):
+
+        if not prompt or len(prompt.strip()) == 0:
+            print("⚠️ Empty prompt → skip LLM")
+            return ""
+
+        for attempt in range(self.max_retries):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt
+                )
+
+                # 🔥 handle trường hợp Gemini trả về None
+                if not response or not hasattr(response, "text"):
+                    print("⚠️ Empty response from Gemini")
+                    return ""
+
+                return response.text.strip()
+
+            except Exception as e:
+                if attempt == self.max_retries - 1:
+                    print(f"❌ Gemini error (final):", e)
+
+                # retry nhẹ
+                time.sleep(2 * (attempt + 1))
+
+        # ❌ fail toàn bộ
+        return ""
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\llm\prompt_answer.py
+================================================================================
+
+def build_answer_prompt(query, data):
+    return f"""
+Bạn là trợ lý AI.
+
+Câu hỏi:
+{query}
+
+Dữ liệu từ database:
+{data}
+
+Yêu cầu:
+- Trả lời bằng tiếng Việt
+- Ngắn gọn, rõ ràng
+- Dựa đúng dữ liệu, không bịa
+
+Trả lời:
+"""
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\llm\prompt_cypher.py
+================================================================================
+
+def build_cypher_prompt(query, schema):
+    return f"""
+You are an expert in Neo4j Cypher.
+
+Graph schema:
+{schema}
+
+User question:
+{query}
+
+Rules:
+- ONLY return Cypher query
+- DO NOT explain
+- Use correct property names from schema
+- Always use MATCH (t:Tire) when querying tire info
+- If filtering by size, use: WHERE t.size = "value"
+- Limit result to 1 if asking single value
+
+Cypher:
+"""
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\llm\tool_calling.py
+================================================================================
+
+# llm/tool_calling.py
+def tool_cypher(query):
+    return f"CALL CYPHER FOR: {query}"
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\mapper\embeddings.py
+================================================================================
+
+from sentence_transformers import SentenceTransformer
+import numpy as np
+
+
+class LocalEmbedding:
+    def __init__(self):
+        # model nhẹ, chạy CPU ok
+        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    def embed(self, text: str) -> np.ndarray:
+        return self.model.encode(text, normalize_embeddings=True)
+
+
+# singleton để reuse model (tránh load lại nhiều lần)
+_embedding_model = LocalEmbedding()
+
+
+def embed_text(text: str) -> list:
+    return _embedding_model.embed(text).tolist()
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\mapper\embedding_matcher.py
+================================================================================
+
+from sentence_transformers import SentenceTransformer
+from numpy.linalg import norm
+import numpy as np
+
+
+class EmbeddingMatcher:
+
+    def __init__(self):
+        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+
+        # mapping property chuẩn
+        self.property_map = {
+            "toc_do_toi_da": "tốc độ tối đa",
+            "tai_trong_lon_nhat": "tải trọng",
+            "noi_ap_tieu_chuan": "áp suất",
+            "duong_kinh_vanh": "đường kính vành",
+            "duong_kinh_ngoai": "đường kính ngoài",
+            "kieu_hoa": "pattern hoa lốp"
+        }
+
+        self.keys = list(self.property_map.keys())
+        self.values = list(self.property_map.values())
+
+        self.embeddings = self.model.encode(self.values)
+
+    def match(self, query: str):
+
+        q_emb = self.model.encode([query])[0]
+
+        scores = np.dot(self.embeddings, q_emb) / (
+            norm(self.embeddings, axis=1) * norm(q_emb) + 1e-9
+        )
+
+        best_idx = int(np.argmax(scores))
+        best_score = scores[best_idx]
+
+        # threshold tránh match ngu
+        if best_score < 0.5:
+            return None
+
+        return self.keys[best_idx]
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\mapper\mapper.py
+================================================================================
+
+from cypher.value_mapper import ValueMapper
+
+
+class Mapper:
+    def __init__(self):
+        self.value_mapper = ValueMapper()
+
+    def map(self, query: str):
+        results = self.value_mapper.map_query(query)
+
+        # DEBUG (rất quan trọng lúc dev)
+        print("\n===== MAPPED =====")
+        print(results)
+
+        return results
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\mapper\value_store.py
+================================================================================
+
+# app/value_store.py
+
+import pandas as pd
+from mapper.embeddings import embed_text
+
+EXCEL_FILE = r"E:\KG\Data_mp_final.xlsx"
+
+TARGET_SHEETS = [
+    "LOP_XM_DRC",
+    "LOP_XM_DPLUS",
+    "LOP_XD_DRC",
+    "tire_variant",
+    "variant_quality_standard"
+]
+
+
+def normalize_text(text: str):
+    return text.lower().strip().replace(" ", "")
+
+
+class ValueStore:
+    def __init__(self):
+        self.data = []
+        self.columns = []
+
+    def build(self):
+        sheets = pd.read_excel(EXCEL_FILE, sheet_name=TARGET_SHEETS)
+
+        COLUMN_SYNONYMS = {
+            "Tốc độ tối đa": "max speed speed velocity",
+            "Chỉ số tải & tốc độ": "load capacity max load tải trọng",
+            "Nội áp tiêu chuẩn": "pressure psi kpa áp suất",
+            "Kiểu hoa": "pattern tread kiểu hoa",
+            "Nhóm lốp": "type category nhóm lốp",
+            "Đường kính vành": "rim size rim diameter đường kính vành"
+        }
+
+        for sheet_name, df in sheets.items():
+            for col in df.columns:
+
+                if "unnamed" in col.lower():
+                    continue
+
+                # 🔥 COLUMN EMBEDDING
+                extra = COLUMN_SYNONYMS.get(col, "")
+                col_text = f"{col} {extra}"
+                col_embedding = embed_text(col_text)
+
+                self.columns.append({
+                    "column": col,
+                    "sheet": sheet_name,
+                    "embedding": col_embedding
+                })
+
+                # 🔥 VALUE
+                unique_values = df[col].dropna().unique()
+
+                for val in unique_values:
+                    raw_val = str(val)
+                    norm_val = normalize_text(raw_val)
+
+                    if not norm_val:
+                        continue
+
+                    text = f"{col}: {raw_val}"
+                    embedding = embed_text(text)
+
+                    self.data.append({
+                        "value": norm_val,   # 🔥 normalized
+                        "raw_value": raw_val,  # 🔥 giữ original để trả ra
+                        "column": col,
+                        "sheet": sheet_name,
+                        "embedding": embedding
+                    })
+
+        print(f"Loaded {len(self.data)} values")
+        print(f"Loaded {len(self.columns)} columns")
+
+
+if __name__ == "__main__":
+    store = ValueStore()
+    store.build()
+
+    print("\n=== SAMPLE DATA ===")
+    for item in store.data[:5]:
+        print(f"{item['raw_value']} → {item['column']}")
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\pipeline\rag_pipeline.py
+================================================================================
+
+from mapper.mapper import Mapper
+from cypher.cypher_builder import CypherBuilder
+from cypher.cypher_generator import CypherGenerator
+from validation.cypher_validator import CypherValidator
+from db.neo4j_client import Neo4jClient
+from llm.answer_generator import AnswerGenerator
+from infra.metrics import Metrics
+from mapper.embedding_matcher import EmbeddingMatcher
+
+from router.rule_router import RuleRouter
+from recommender.tire_recommender import TireRecommender
+from router.auto_learner import AutoLearner
+
+# 🔥 NEW: multitask model
+from training.train_multitask import MultiTaskModel
+
+import random
+
+
+class RAGPipeline:
+    def __init__(self, debug=True):
+        self.mapper = Mapper()
+        self.builder = CypherBuilder()
+        self.generator = CypherGenerator()
+        self.validator = CypherValidator()
+        self.db = Neo4jClient()
+        self.answer_llm = AnswerGenerator()
+        self.metrics = Metrics()
+        self.embed_matcher = EmbeddingMatcher()
+
+        self.rule_router = RuleRouter()
+        self.recommender = TireRecommender()
+        self.auto_learner = AutoLearner()
+
+        # 🔥 LOAD MULTITASK MODEL
+        self.model = MultiTaskModel()
+        self.model.load()
+
+        self.debug = debug
+
+    def _log(self, title, data):
+        if self.debug:
+            print(f"\n===== {title} =====")
+            print(data)
+
+    def run(self, query: str):
+        start = self.metrics.start_timer()
+        self._log("QUERY", query)
+
+        # ======================
+        # 1. INTENT + ROUTE (ML)
+        # ======================
+        intent, route = self.model.predict(query)
+        self._log("INTENT", intent)
+        self._log("ROUTE (ML)", route)
+
+        # ======================
+        # 2. RULE OVERRIDE
+        # ======================
+        rule_route = self.rule_router.route(query)
+
+        if rule_route:
+            route = rule_route
+            self._log("ROUTE (RULE OVERRIDE)", route)
+
+        # ======================
+        # 3. ASK INFO
+        # ======================
+        if route == "ASK_INFO":
+            return "Bạn đang dùng xe gì? (ví dụ: Vision, Exciter, Air Blade)"
+
+        # ======================
+        # 4. RECOMMEND FLOW
+        # ======================
+        if route == "RECOMMEND":
+            recs = self.recommender.recommend(query)
+
+            if isinstance(recs, dict):
+                return recs["message"]
+
+            answer = "🔧 Gợi ý lốp:\n"
+
+            for r in recs:
+                t = r["tire"]
+                answer += f"\n- {t.get('size')} | {t.get('brand')} (Score: {r['score']})\n"
+                for reason in r["reasons"]:
+                    answer += f"   ✔ {reason}\n"
+
+            return answer
+
+        # ======================
+        # 5. MAPPING
+        # ======================
+        mapped = self.mapper.map(query)
+        self._log("MAPPED", mapped)
+
+        # embedding fallback
+        if not any(r.get("type") == "column_detect" for r in mapped):
+            prop = self.embed_matcher.match(query)
+            if prop:
+                mapped.append({
+                    "type": "column_detect",
+                    "column": prop
+                })
+                self._log("EMBEDDING MATCH", prop)
+
+        # ======================
+        # 6. BUILD CYPHER
+        # ======================
+        if route == "RULE":
+            cypher = self.builder.build(mapped, query)
+            print("👉 RULE CYPHER GENERATED")
+        else:
+            cypher = self.generator.generate(query)
+
+            if not cypher:
+                print("👉 LLM FAIL → fallback RULE")
+                cypher = self.builder.build(mapped, query)
+
+        self._log("CYPHER FINAL", cypher)
+
+        # ======================
+        # 7. VALIDATE
+        # ======================
+        if not self.validator.validate(cypher):
+            print("👉 VALIDATE FAIL → retry LLM")
+
+            cypher_llm = self.generator.generate(query)
+
+            if cypher_llm and self.validator.validate(cypher_llm):
+                cypher = cypher_llm
+            else:
+                print("👉 LLM vẫn fail → dùng RULE")
+                cypher = self.builder.build(mapped, query)
+
+        # ======================
+        # 8. QUERY DB
+        # ======================
+        result = self.db.query(cypher)
+        self._log("DB RESULT", result)
+
+        # ======================
+        # 9. METRICS
+        # ======================
+        latency = self.metrics.end_timer(start)
+        self.metrics.log(query, cypher, result, latency)
+
+        # ======================
+        # 🔥 AUTO LEARNING
+        # ======================
+        self.auto_learner.log(query, route, mapped)
+
+        if random.random() < 0.05:
+            print("🧠 Auto-learning triggered...")
+            self.auto_learner.merge_and_retrain()
+
+        # ======================
+        # 10. ANSWER
+        # ======================
+        answer = self.answer_llm.generate(query, result)
+        self._log("FINAL ANSWER", answer)
+
+        return answer
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\recommender\context_parser.py
+================================================================================
+
+import re
+
+class ContextParser:
+
+    def parse(self, query: str):
+        q = query.lower()
+
+        context = {
+            "vehicle_type": None,
+            "priority": [],
+            "budget": None
+        }
+
+        # vehicle
+        if "vision" in q or "air blade" in q:
+            context["vehicle_type"] = "scooter"
+        elif "exciter" in q or "winner" in q:
+            context["vehicle_type"] = "sport"
+
+        # priority
+        if "bền" in q:
+            context["priority"].append("durability")
+        if "êm" in q:
+            context["priority"].append("comfort")
+        if "nhanh" in q or "tốc độ" in q:
+            context["priority"].append("speed")
+        if "rẻ" in q or "giá" in q:
+            context["priority"].append("price")
+
+        # budget (simple)
+        match = re.search(r"\d+", q)
+        if match:
+            context["budget"] = int(match.group())
+
+        return context
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\recommender\explanation_generator.py
+================================================================================
+
+class ExplanationGenerator:
+
+    def explain(self, tire: dict, context: dict):
+        reasons = []
+
+        if tire.get("tai_trong_lon_nhat", 0) > 300:
+            reasons.append("Độ bền cao")
+
+        if tire.get("toc_do_toi_da", 0) > 120:
+            reasons.append("Phù hợp chạy tốc độ cao")
+
+        if tire.get("gia_ban_co_vat", 0) < 800000:
+            reasons.append("Giá hợp lý")
+
+        if "comfort" in context.get("priority", []):
+            reasons.append("Êm khi di chuyển")
+
+        return reasons
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\recommender\scoring_engine.py
+================================================================================
+
+class ScoringEngine:
+
+    def score(self, tire: dict, context: dict):
+        score = 0
+
+        # default weights
+        weights = {
+            "durability": 0.3,
+            "comfort": 0.2,
+            "speed": 0.2,
+            "price": 0.3
+        }
+
+        # adjust theo context
+        for p in context.get("priority", []):
+            weights[p] += 0.2
+
+        # normalize
+        total = sum(weights.values())
+        weights = {k: v / total for k, v in weights.items()}
+
+        # lấy data từ KG
+        durability = tire.get("tai_trong_lon_nhat", 0)
+        speed = tire.get("toc_do_toi_da", 0)
+        price = tire.get("gia_ban_co_vat", 1000000)
+
+        # giả lập comfort
+        comfort = durability * 0.8
+
+        # normalize đơn giản
+        score += weights["durability"] * (durability / 500)
+        score += weights["speed"] * (speed / 200)
+        score += weights["price"] * (1 - price / 2000000)
+        score += weights["comfort"] * (comfort / 500)
+
+        return round(score, 3)
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\recommender\tire_recommender.py
+================================================================================
+
+from db.neo4j_client import Neo4jClient
+from recommender.context_parser import ContextParser
+from recommender.scoring_engine import ScoringEngine
+from recommender.explanation_generator import ExplanationGenerator
+
+class TireRecommender:
+
+    def __init__(self):
+        self.db = Neo4jClient()
+        self.parser = ContextParser()
+        self.scorer = ScoringEngine()
+        self.explainer = ExplanationGenerator()
+
+    def recommend(self, query: str):
+        context = self.parser.parse(query)
+
+        # ❗ ASK BACK nếu thiếu context
+        if not context["vehicle_type"]:
+            return {
+                "type": "ask_back",
+                "message": "Bạn đang đi xe gì (Vision, Exciter...)?"
+            }
+
+        # query KG
+        cypher = """
+        MATCH (t:Tire)
+        RETURN t
+        LIMIT 50
+        """
+
+        records = self.db.query(cypher)
+
+        tires = [r["t"] for r in records]
+
+        if not tires:
+            return {
+                "type": "no_result",
+                "message": "Không có dữ liệu lốp phù hợp."
+            }
+
+        # scoring
+        scored = []
+        for t in tires:
+            s = self.scorer.score(t, context)
+            reasons = self.explainer.explain(t, context)
+
+            scored.append({
+                "tire": t,
+                "score": s,
+                "reasons": reasons
+            })
+
+        # sort
+        scored = sorted(scored, key=lambda x: x["score"], reverse=True)[:5]
+
+        return scored
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\router\auto_learner.py
+================================================================================
+
+import json
+import os
+
+
+class AutoLearner:
+
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        self.log_path = os.path.join(base_dir, "logs.json")
+        self.train_path = os.path.join(base_dir, "train_data.json")
+        self.model_path = os.path.join(base_dir, "intent_model.pkl")
+
+        # 🔥 đảm bảo folder tồn tại
+        os.makedirs(base_dir, exist_ok=True)
+
+        # 🔥 tạo file log nếu chưa có
+        if not os.path.exists(self.log_path):
+            with open(self.log_path, "w", encoding="utf-8") as f:
+                json.dump([], f)
+
+    # ======================
+    # 🔥 SAVE QUERY LOG
+    # ======================
+    def log(self, query, route, mapped):
+        record = {
+            "query": query,
+            "label": None,
+            "predicted": route,
+            "mapped": mapped
+        }
+
+        with open(self.log_path, "r+", encoding="utf-8") as f:
+            data = json.load(f)
+            data.append(record)
+            f.seek(0)
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # ======================
+    # 🔥 MERGE LOG → TRAIN DATA
+    # ======================
+    def merge_and_retrain(self):
+        if not os.path.exists(self.log_path):
+            return
+
+        with open(self.log_path, "r", encoding="utf-8") as f:
+            logs = json.load(f)
+
+        if len(logs) < 200:
+            print("⚠️ Not enough new data to retrain")
+            return
+
+        # load train_data
+        if not os.path.exists(self.train_path):
+            train_data = []
+        else:
+            with open(self.train_path, "r", encoding="utf-8") as f:
+                train_data = json.load(f)
+
+        # merge
+        new_data = [
+            {"query": l["query"], "label": l["label"]}
+            for l in logs
+            if l.get("label") in ["RULE", "LLM"]
+        ]
+        
+        if len(new_data) < 100:
+            print("⚠️ Not enough labeled data → skip retrain")
+            return
+        
+        merged = train_data + new_data
+
+        with open(self.train_path, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+
+        # clear logs
+        with open(self.log_path, "w") as f:
+            json.dump([], f)
+
+        print(f"🔥 Retraining with {len(merged)} samples...")
+
+        # xóa model cũ để train lại
+        if os.path.exists(self.model_path):
+            os.remove(self.model_path)
+
+        print("✅ Ready for retrain on next run")
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\router\intent_model.py
+================================================================================
+
+# router/intent_model.py
+
+import joblib
+import os
+
+
+class IntentModel:
+    def __init__(self, model_path=None):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        if model_path is None:
+            model_path = os.path.join(base_dir, "intent_model.pkl")
+
+        self.model_path = model_path
+
+        if not os.path.exists(self.model_path):
+            raise Exception("❌ intent_model.pkl not found. Run training first!")
+
+        self.model = joblib.load(self.model_path)
+        print("✅ Intent model loaded")
+
+    # ======================
+    # PREDICT
+    # ======================
+    def predict(self, query: str):
+        try:
+            intent = self.model.predict([query])[0]
+            probs = self.model.predict_proba([query])[0]
+            confidence = max(probs)
+
+            return intent, confidence
+
+        except Exception as e:
+            print(f"[IntentModel] predict error: {e}")
+            return "unknown", 0.0
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\router\ml_router.py
+================================================================================
+
+import pickle
+from sentence_transformers import SentenceTransformer
+from router.rule_router import RuleRouter
+
+
+class MLRouter:
+    def __init__(self):
+        self.rule_router = RuleRouter()
+        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+        with open("router/multitask_model.pkl", "rb") as f:
+            data = pickle.load(f)
+
+        self.intent_clf = data["intent"]
+        self.route_clf = data["route"]
+
+    def predict(self, query: str):
+
+        # 🔥 RULE override
+        rule = self.rule_router.route(query)
+        if rule:
+            return rule
+
+        vec = self.embedder.encode([query])
+
+        route = self.route_clf.predict(vec)[0]
+
+        return route
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\router\rule_router.py
+================================================================================
+
+import re
+
+class RuleRouter:
+
+    def __init__(self):
+        # ======================
+        # SIZE PATTERN
+        # ======================
+        self.size_pattern = re.compile(
+            r"\b\d{2,3}/\d{2}-\d{2}\b|\b\d\.\d{2}-\d{2}\b"
+        )
+
+        # ======================
+        # RULE KEYWORDS
+        # ======================
+        self.rule_keywords = [
+            "bao nhiêu",
+            "giá",
+            "tốc độ",
+            "áp suất",
+            "kích thước",
+            "size",
+            "đường kính",
+            "chiều rộng"
+        ]
+
+        # ======================
+        # RECOMMEND KEYWORDS
+        # ======================
+        self.recommend_keywords = [
+            "nên dùng",
+            "tư vấn",
+            "chọn lốp",
+            "loại nào tốt",
+            "gợi ý"
+        ]
+
+        # ======================
+        # AMBIGUOUS
+        # ======================
+        self.ask_info_keywords = [
+            "xe tôi",
+            "đi xe",
+            "dùng xe"
+        ]
+
+    # ======================
+    # DETECT SIZE
+    # ======================
+    def detect_size(self, query):
+        return bool(self.size_pattern.search(query))
+
+    # ======================
+    # RULE DETECTION
+    # ======================
+    def is_rule_query(self, query):
+        q = query.lower()
+
+        if any(k in q for k in self.rule_keywords):
+            return True
+
+        if self.detect_size(q):
+            return True
+
+        return False
+
+    # ======================
+    # RECOMMEND DETECTION
+    # ======================
+    def is_recommend(self, query):
+        q = query.lower()
+        return any(k in q for k in self.recommend_keywords)
+
+    # ======================
+    # ASK INFO
+    # ======================
+    def is_ambiguous(self, query):
+        q = query.lower()
+        return any(k in q for k in self.ask_info_keywords)
+
+    # ======================
+    # MAIN ROUTE
+    # ======================
+    def route(self, query, mapped=None, intent=None):
+        """
+        Priority:
+        1. intent (ML)
+        2. keyword + regex
+        3. mapping
+        """
+
+        # ======================
+        # 1. INTENT (nếu có)
+        # ======================
+        if intent:
+            if intent == "recommend":
+                return "RECOMMEND"
+
+            if intent in ["ask_info", "ask_property", "ask_speed"]:
+                return "RULE"
+
+            if intent in ["compare", "ask_feature", "brand"]:
+                return "LLM"
+
+        # ======================
+        # 2. KEYWORD LOGIC
+        # ======================
+        if self.is_recommend(query):
+            if self.is_ambiguous(query):
+                return "ASK_INFO"
+            return "RECOMMEND"
+
+        if self.is_rule_query(query):
+            return "RULE"
+
+        # ======================
+        # 3. MAPPING (fallback)
+        # ======================
+        if mapped:
+            has_column = any(m.get("type") == "column_detect" for m in mapped)
+            if has_column:
+                return "RULE"
+
+        # ======================
+        # 4. DEFAULT
+        # ======================
+        return "LLM"
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\tests\test_models.py
+================================================================================
+
+from google import genai
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+print("===== AVAILABLE MODELS =====")
+
+for m in client.models.list():
+    print(m.name)
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\tests\test_pipeline.py
+================================================================================
+
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from pipeline.rag_pipeline import RAGPipeline
+
+pipeline = RAGPipeline()
+
+queries = [
+    
+    # # ======================
+    # # 🔥 RULE (numeric / fact)
+    # # ======================
+    # "lốp 110/70-14 có tốc độ tối đa bao nhiêu",
+    # "tải trọng của lốp 90/80-17 là bao nhiêu",
+    # "áp suất lốp 100/80-14 bao nhiêu",
+    # "cho tôi biết tốc độ tối đa của lốp 110/70-14",
+
+    # # ======================
+    # # 🔥 LLM (đánh giá)
+    # # ======================
+    # "lốp 110/70-14 dùng có bền không",
+    # "lốp 110/70-14 chạy tốc độ cao có ổn không",
+    # "lốp 90/80-17 có tốt không",
+    # "tôi nên chọn lốp nào để chở nặng",
+
+    # # ======================
+    # # 🔥 COMPARE
+    # # ======================
+    # "so sánh lốp 110/70-14 và 90/80-17",
+    # "lốp nào chịu tải tốt hơn giữa 110/70-14 và 90/80-17",
+    # "110/70-14 và 120/70-17 loại nào tốt hơn",
+
+    # # ======================
+    # # 🔥 BRAND
+    # # ======================
+    # "lốp honda 110/70-14 có tốt không",
+    # "đánh giá lốp yamaha 90/80-17",
+    # "nên dùng lốp michelin 120/70-17 không",
+
+    # ======================
+    # 🔥 EDGE CASE (khó)
+    # ======================
+    "lốp 110/70-14",
+    "110/70-14 có gì đặc biệt",
+    "xe tôi nên dùng loại lốp nào",
+    "lốp nào tốt nhất hiện nay",
+
+    # ======================
+    # 🔥 RANDOM
+    # ======================
+    "lốp 100/90-17 có bền không",
+    "tốc độ tối đa của lốp 120/70-17 là bao nhiêu",
+]
+
+for i, q in enumerate(queries, 1):
+    print("\n" + "="*50)
+    print(f"🔎 TEST {i}: {q}")
+    print("="*50)
+
+    try:
+        # 🔥 check route trước
+        route = pipeline.router.route(q, [])
+        print("🧠 ROUTE:", route)
+
+        result = pipeline.run(q)
+
+        print("\n✅ FINAL RESULT:")
+        print(result)
+
+        # 🔥 check lỗi
+        if not result or result.strip() == "":
+            print("⚠️ EMPTY ANSWER")
+
+        if "None" in result or "[]" in result:
+            print("⚠️ BAD OUTPUT")
+
+    except Exception as e:
+        print("\n❌ ERROR:")
+        print(e)
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\training\intent_schema.json
+================================================================================
+
+{
+  "intents": [
+    "ask_info",
+    "ask_property",
+    "ask_feature",
+    "compare",
+    "brand",
+    "recommend"
+  ]
+}
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\training\train_multitask.py
+================================================================================
+
+import json
+import pickle
+from sentence_transformers import SentenceTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+
+class MultiTaskModel:
+    def __init__(self):
+        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+        self.intent_clf = LogisticRegression(max_iter=300)
+        self.route_clf = LogisticRegression(max_iter=300)
+        
+        self.intent_clf = LogisticRegression(max_iter=300, class_weight="balanced")
+        self.route_clf = LogisticRegression(max_iter=300, class_weight="balanced")
+
+    def load_data(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        texts = [d["text"] for d in data]
+        intents = [d["intent"] for d in data]
+        routes = [d["route"] for d in data]
+
+        return texts, intents, routes
+
+    def train(self, path="training/dataset_train/multitask_dataset.json"):
+        texts, intents, routes = self.load_data(path)
+
+        print(f"🚀 Training MultiTask Model on {len(texts)} samples...")
+
+        X = self.embedder.encode(texts)
+
+        X_train, X_test, y_int_train, y_int_test, y_route_train, y_route_test = train_test_split(
+            X, intents, routes, test_size=0.2, random_state=42
+        )
+
+        # train
+        self.intent_clf.fit(X_train, y_int_train)
+        self.route_clf.fit(X_train, y_route_train)
+
+        # eval
+        print("\n🎯 Intent Report:")
+        print(classification_report(y_int_test, self.intent_clf.predict(X_test)))
+
+        print("\n🎯 Route Report:")
+        print(classification_report(y_route_test, self.route_clf.predict(X_test)))
+
+        # save
+        with open("router/multitask_model.pkl", "wb") as f:
+            pickle.dump({
+                "intent": self.intent_clf,
+                "route": self.route_clf
+            }, f)
+
+        print("✅ Multi-task model trained & saved")
+
+    def load(self, path="router/multitask_model.pkl"):
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+
+        self.intent_clf = data["intent"]
+        self.route_clf = data["route"]
+
+    def predict(self, query: str):
+        vec = self.embedder.encode([query])
+
+        intent = self.intent_clf.predict(vec)[0]
+        route = self.route_clf.predict(vec)[0]
+
+        return intent, route
+
+
+if __name__ == "__main__":
+    model = MultiTaskModel()
+    model.train()
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\training\builders\context_recommend_builder.py
+================================================================================
+
+import random
+
+class ContextRecommendBuilder:
+
+    def __init__(self):
+        self.vehicle_types = ["wave", "vision", "exciter", "sirius"]
+        self.usage = ["đi phố", "đi đường dài", "chở nặng"]
+        self.budgets = ["500k", "1 triệu", "2 triệu"]
+
+    def build(self):
+        data = []
+
+        for v in self.vehicle_types:
+            data.append({
+                "text": f"xe {v} nên dùng lốp nào",
+                "intent": "recommend",
+                "route": "RECOMMEND"
+            })
+
+        for u in self.usage:
+            data.append({
+                "text": f"tôi {u} nên chọn lốp nào",
+                "intent": "recommend",
+                "route": "RECOMMEND"
+            })
+
+        for b in self.budgets:
+            data.append({
+                "text": f"ngân sách {b} nên mua lốp gì",
+                "intent": "recommend",
+                "route": "RECOMMEND"
+            })
+
+        return data
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\training\builders\data_builder_pro.py
+================================================================================
+
+import json
+import random
+import os
+from collections import defaultdict
+
+from db.kg_loader import KGLoader
+from training.builders.paraphrase_generator import ParaphraseGenerator
+from training.builders.hard_negative_builder import HardNegativeBuilder
+from training.builders.context_recommend_builder import ContextRecommendBuilder
+
+
+class DataBuilderPro:
+
+    def __init__(self):
+        self.kg = KGLoader()
+        self.ctx = self.kg.get_full_context()
+
+        self.paraphraser = ParaphraseGenerator()
+        self.hard_negative = HardNegativeBuilder()
+        self.context_builder = ContextRecommendBuilder(self.kg)
+
+    # ======================
+    # TEMPLATE BANK
+    # ======================
+    def templates(self):
+        return {
+            "ask_info": {
+                "route": "RULE",
+                "templates": [
+                    "lốp {size}",
+                    "thông tin lốp {size}",
+                    "cho tôi thông số {size}",
+                    "lop {size} la gi"
+                ]
+            },
+            "ask_property": {
+                "route": "RULE",
+                "templates": [
+                    "{prop} của lốp {size} là gì",
+                    "lốp {size} có {prop} bao nhiêu",
+                    "cho tôi biết {prop} của {size}",
+                    "{size} {prop}"
+                ]
+            },
+            "ask_feature": {
+                "route": "LLM",
+                "templates": [
+                    "lốp {size} có {prop} tốt không",
+                    "{prop} của lốp {size} có ổn không",
+                    "đánh giá {prop} của {size}",
+                    "{size} {prop} có ok không"
+                ]
+            },
+            "compare": {
+                "route": "LLM",
+                "templates": [
+                    "so sánh lốp {s1} và {s2}",
+                    "{s1} với {s2} cái nào tốt hơn",
+                    "{s1} vs {s2}"
+                ]
+            },
+            "brand": {
+                "route": "LLM",
+                "templates": [
+                    "lốp {brand} có tốt không",
+                    "hãng {brand} có bền không",
+                    "đánh giá hãng {brand}"
+                ]
+            },
+            "recommend": {
+                "route": "RECOMMEND",
+                "templates": [
+                    "xe tôi nên dùng lốp nào",
+                    "tư vấn chọn lốp",
+                    "chọn lốp nào tốt",
+                    "recommend lop cho toi"
+                ]
+            }
+        }
+
+    def humanize(self, prop):
+        return prop.replace("_", " ")
+
+    def add_noise(self, text):
+        replacements = {
+            "lốp": "lop",
+            "tốt": "tot",
+            "không": "ko",
+            "bao nhiêu": "bn",
+            "đánh giá": "dg"
+        }
+
+        for k, v in replacements.items():
+            if random.random() < 0.3:
+                text = text.replace(k, v)
+
+        return text
+
+    def deduplicate(self, data):
+        seen = set()
+        unique = []
+
+        for d in data:
+            if d["text"] not in seen:
+                seen.add(d["text"])
+                unique.append(d)
+
+        return unique
+
+    def balance(self, data):
+        grouped = defaultdict(list)
+
+        for d in data:
+            grouped[d["intent"]].append(d)
+
+        min_size = min(len(v) for v in grouped.values())
+
+        balanced = []
+        for v in grouped.values():
+            balanced.extend(random.sample(v, min_size))
+
+        return balanced
+
+    # ======================
+    # MAIN BUILD
+    # ======================
+    def build(self, output_path="training/dataset_train/multitask_dataset.json"):
+
+        data = []
+        tpls = self.templates()
+
+        sizes = self.ctx.get("sizes", [])
+        brands = self.ctx.get("brands", [])
+        props = self.ctx.get("properties", [])
+
+        if not sizes or not props:
+            raise ValueError("❌ KG thiếu dữ liệu")
+
+        # ========= BASE DATA =========
+        for size in sizes:
+            for temp in tpls["ask_info"]["templates"]:
+                data.append({"text": temp.format(size=size), "intent": "ask_info", "route": "RULE"})
+
+        for size in sizes:
+            for prop in props:
+                p = self.humanize(prop)
+
+                for temp in tpls["ask_property"]["templates"]:
+                    data.append({"text": temp.format(size=size, prop=p), "intent": "ask_property", "route": "RULE"})
+
+                for temp in tpls["ask_feature"]["templates"]:
+                    data.append({"text": temp.format(size=size, prop=p), "intent": "ask_feature", "route": "LLM"})
+
+        for i in range(len(sizes)):
+            for j in range(i + 1, len(sizes)):
+                for temp in tpls["compare"]["templates"]:
+                    data.append({"text": temp.format(s1=sizes[i], s2=sizes[j]), "intent": "compare", "route": "LLM"})
+
+        for brand in brands:
+            for temp in tpls["brand"]["templates"]:
+                data.append({"text": temp.format(brand=brand), "intent": "brand", "route": "LLM"})
+
+        for _ in range(len(sizes) * 2):
+            for temp in tpls["recommend"]["templates"]:
+                data.append({"text": temp, "intent": "recommend", "route": "RECOMMEND"})
+
+        print(f"📊 Base samples: {len(data)}")
+
+        # ========= AUGMENT =========
+        augmented = []
+        for d in data:
+            paras = self.paraphraser.paraphrase(d["text"])
+            for p in paras:
+                augmented.append({
+                    "text": p,
+                    "intent": d["intent"],
+                    "route": d["route"]
+                })
+
+        data.extend(augmented)
+        print(f"✨ After paraphrase: {len(data)}")
+
+        # ========= HARD NEGATIVE =========
+        negatives = self.hard_negative.build(sizes)
+        data.extend(negatives)
+
+        # ========= CONTEXT RECOMMEND =========
+        ctx_data = self.context_builder.build()
+        data.extend(ctx_data)
+
+        print(f"🔥 After augmentation: {len(data)}")
+
+        # ========= CLEAN =========
+        data = self.deduplicate(data)
+
+        for d in data:
+            if random.random() < 0.3:
+                d["text"] = self.add_noise(d["text"])
+
+        data = self.balance(data)
+        random.shuffle(data)
+
+        # ========= SAVE =========
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        print(f"✅ DONE: {len(data)} samples → {output_path}")
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\training\builders\hard_negative_builder.py
+================================================================================
+
+import random
+
+class HardNegativeBuilder:
+
+    def __init__(self):
+        pass
+
+    def build(self, sizes):
+        data = []
+
+        # 🔥 CASE 1: ambiguous RULE vs LLM
+        for size in sizes:
+            data.append({
+                "text": f"lốp {size} tốt không",
+                "intent": "ask_feature",
+                "route": "LLM"
+            })
+
+            data.append({
+                "text": f"tốc độ lốp {size}",
+                "intent": "ask_property",
+                "route": "RULE"
+            })
+
+        # 🔥 CASE 2: tricky recommend
+        data.extend([
+            {
+                "text": "lốp nào tốt",
+                "intent": "recommend",
+                "route": "RECOMMEND"
+            },
+            {
+                "text": "nên chọn loại lốp nào",
+                "intent": "recommend",
+                "route": "RECOMMEND"
+            }
+        ])
+
+        return data
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\training\builders\paraphrase_generator.py
+================================================================================
+
+import random
+
+class ParaphraseGenerator:
+
+    def __init__(self):
+        self.synonyms = {
+            "lốp": ["lop", "vỏ xe"],
+            "tốt": ["ổn", "ok", "xịn"],
+            "không": ["ko", "kh"],
+            "bao nhiêu": ["bn", "bao nhiu"],
+            "đánh giá": ["review", "nhận xét"]
+        }
+
+    def paraphrase(self, text, n=2):
+        results = []
+
+        for _ in range(n):
+            new_text = text
+
+            for k, vals in self.synonyms.items():
+                if k in new_text and random.random() < 0.5:
+                    new_text = new_text.replace(k, random.choice(vals))
+
+            results.append(new_text.lower())
+
+        return list(set(results))
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\validation\cypher_validator.py
+================================================================================
+
+import os
+import re
+import json
+
+
+class CypherValidator:
+
+    def __init__(self):
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        schema_path = os.path.join(BASE_DIR, "../cypher/graph_schema.json")
+
+        with open(schema_path, "r", encoding="utf-8") as f:
+            self.schema = json.load(f)
+
+        self.valid_props = {
+            p for props in self.schema["properties"].values() for p in props
+        }
+
+    def validate(self, cypher: str):
+        print("\n===== VALIDATING CYPHER =====")
+        print(cypher)
+
+        if not cypher or len(cypher.strip()) == 0:
+            print("❌ INVALID: empty cypher")
+            return False
+
+        # KHÔNG PHÁ DB !
+        danger_keywords = ["DELETE", "CREATE", "MERGE", "SET"]
+        for kw in danger_keywords:
+            if kw in cypher.upper():
+                print(f"❌ INVALID: contains {kw}")
+                return False
+
+        print("✅ CYPHER OK")
+        return True
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\validation\guardrails.py
+================================================================================
+
+# validation/guardrails.py
+def check_dangerous_query(cypher):
+    banned = ["DELETE", "DROP", "REMOVE"]
+    return not any(b in cypher.upper() for b in banned)
+
+
+================================================================================
+FILE: E:\KG\graph_rag_enterprise\validation\schema_checker.py
+================================================================================
+
+class SchemaChecker:
+
+    def __init__(self, schema):
+        self.schema = schema
+
+    def is_valid_property(self, prop):
+        for props in self.schema["properties"].values():
+            if prop in props:
+                return True
+        return False
+

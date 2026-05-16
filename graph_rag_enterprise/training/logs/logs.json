@@ -1,0 +1,285 @@
+[
+  {
+    "query": "lốp 110/70-14 dùng có bền không",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "110/70-14",
+        "value": "110/70-14",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      }
+    ]
+  },
+  {
+    "query": "lốp này đi có êm không",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "này đi  êm không",
+        "column": "loai_xe_dap",
+        "score": 0.6678601454716839,
+        "type": "column_detect"
+      }
+    ]
+  },
+  {
+    "query": "tôi nên chọn lốp nào để chở nặng",
+    "label": "LLM",
+    "mapped": [
+      {
+        "type": "column_detect",
+        "column": "toc_do_toi_da"
+      }
+    ]
+  },
+  {
+    "query": "so sánh lốp 110/70-14 và 90/80-17",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "110/70-14",
+        "value": "110/70-14",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      },
+      {
+        "query_part": "90/80-17",
+        "value": "90/80-17",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      }
+    ]
+  },
+  {
+    "query": "lốp nào chịu tải tốt hơn giữa 110/70-14 và 90/80-17",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "110/70-14",
+        "value": "110/70-14",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      },
+      {
+        "query_part": "90/80-17",
+        "value": "90/80-17",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      },
+      {
+        "query_part": "nào chịu tải tốt hơn giữa  và",
+        "column": "chieu_sau_hoa",
+        "score": 0.6071123685830279,
+        "type": "column_detect"
+      }
+    ]
+  },
+  {
+    "query": "110/70-14 và 120/70-17 loại nào tốt hơn",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "110/70-14",
+        "value": "110/70-14",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      },
+      {
+        "query_part": "120/70-17",
+        "value": "120/70-17",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      },
+      {
+        "query_part": "và  loại nào tốt hơn",
+        "column": "gia_nhap_chua_vat",
+        "score": 0.6503379715748966,
+        "type": "column_detect"
+      }
+    ]
+  },
+  {
+    "query": "lốp honda 110/70-14 có tốt không",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "110/70-14",
+        "value": "110/70-14",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      }
+    ]
+  },
+  {
+    "query": "đánh giá lốp yamaha 90/80-17",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "90/80-17",
+        "value": "90/80-17",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      }
+    ]
+  },
+  {
+    "query": "nên dùng lốp michelin 120/70-17 không",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "120/70-17",
+        "value": "120/70-17",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      }
+    ]
+  },
+  {
+    "query": "lốp 110/70-14",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "110/70-14",
+        "value": "110/70-14",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      }
+    ]
+  },
+  {
+    "query": "110/70-14 có gì đặc biệt",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "110/70-14",
+        "value": "110/70-14",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      }
+    ]
+  },
+  {
+    "query": "xe tôi nên dùng loại lốp nào",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "xe tôi nên dùng loại  nào",
+        "column": "loai_xe_dap",
+        "score": 0.6371913091306415,
+        "type": "column_detect"
+      }
+    ]
+  },
+  {
+    "query": "lốp nào tốt nhất hiện nay",
+    "label": "LLM",
+    "mapped": []
+  },
+  {
+    "query": "lốp 100/90-17 có bền không",
+    "label": "LLM",
+    "mapped": [
+      {
+        "query_part": "100/90-17",
+        "value": "100/90-17",
+        "column": "Giá trị quy cách",
+        "score": 0.5,
+        "type": "size_fallback"
+      }
+    ]
+  },
+  {
+    "query": "lốp 110/70-14",
+    "label": null,
+    "predicted": "LLM",
+    "mapped": [
+      {
+        "query_part": "110/70-14",
+        "value": "110/70-14",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      }
+    ]
+  },
+  {
+    "query": "110/70-14 có gì đặc biệt",
+    "label": null,
+    "predicted": "LLM",
+    "mapped": [
+      {
+        "query_part": "110/70-14",
+        "value": "110/70-14",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      }
+    ]
+  },
+  {
+    "query": "xe tôi nên dùng loại lốp nào",
+    "label": null,
+    "predicted": "LLM",
+    "mapped": [
+      {
+        "query_part": "xe tôi nên dùng loại  nào",
+        "column": "loai_xe_dap",
+        "score": 0.6371913091306415,
+        "type": "column_detect"
+      }
+    ]
+  },
+  {
+    "query": "lốp nào tốt nhất hiện nay",
+    "label": null,
+    "predicted": "RULE",
+    "mapped": []
+  },
+  {
+    "query": "lốp 100/90-17 có bền không",
+    "label": null,
+    "predicted": "LLM",
+    "mapped": [
+      {
+        "query_part": "100/90-17",
+        "value": "100/90-17",
+        "column": "Giá trị quy cách",
+        "score": 0.5,
+        "type": "size_fallback"
+      }
+    ]
+  },
+  {
+    "query": "tốc độ tối đa của lốp 120/70-17 là bao nhiêu",
+    "label": null,
+    "predicted": "RULE",
+    "mapped": [
+      {
+        "query_part": "120/70-17",
+        "value": "120/70-17",
+        "column": "Giá trị quy cách",
+        "score": 1.0,
+        "type": "exact"
+      },
+      {
+        "query_part": "tốc độ tối đa",
+        "column": "toc_do_toi_da",
+        "score": 0.698918062796289,
+        "type": "column_detect"
+      }
+    ]
+  }
+]

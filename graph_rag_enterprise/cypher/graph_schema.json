@@ -1,0 +1,121 @@
+{
+  "nodes": [
+    "Tire",
+    "TirePattern",
+    "QualityStandard",
+    "TireType",
+    "Tube",
+    "Brand",
+    "Van",
+    "Company"
+  ],
+  "relationships": [
+    "CÓ_HOA",
+    "THUỘC_NHÓM",
+    "DÙNG_CHO",
+    "CÓ_BIẾN_THỂ",
+    "ĐẠT_CHUẨN",
+    "SẢN_XUẤT_SĂM",
+    "DÙNG_VAN",
+    "CO_SP"
+  ],
+  "properties": {
+    "Tire": [
+      "kieu_quy_cach",
+      "duong_kinh_ngoai",
+      "co_sam",
+      "tai_trong_lon_nhat",
+      "chieu_rong_vanh",
+      "gia_nhap_chua_vat",
+      "toc_do_toi_da",
+      "vehicle_type",
+      "gia_nhap_co_vat",
+      "kieu_hoa",
+      "loai_xe_dap",
+      "so_lop_bo",
+      "duong_kinh_vanh",
+      "rong_vanh_thich_hop",
+      "nhom_lop",
+      "phan_loai_tai",
+      "gia_ban_co_vat",
+      "gia_ban_chua_vat",
+      "vanh",
+      "chieu_rong_toan_bo",
+      "chi_so_tai_toc_do",
+      "cau_truc_lop",
+      "noi_ap_tieu_chuan",
+      "dong_series",
+      "size",
+      "chieu_sau_hoa",
+      "brand",
+      "rong_vanh_tieu_chuan"
+    ],
+    "TirePattern": [
+      "pattern"
+    ],
+    "TireType": [
+      "name"
+    ],
+    "Tube": [
+      "vehicle_type",
+      "chieu_day_gap_doi",
+      "kieu_quy_cach",
+      "size",
+      "chieu_rong_gap_doi"
+    ],
+    "QualityStandard": [
+      "name"
+    ],
+    "Brand": [
+      "name"
+    ],
+    "Van": [
+      "name"
+    ],
+    "Company": [
+      "name"
+    ]
+  },
+  "graph": [
+    {
+      "from": "Tire",
+      "rel": "CÓ_HOA",
+      "to": "TirePattern"
+    },
+    {
+      "from": "Tire",
+      "rel": "THUỘC_NHÓM",
+      "to": "TireType"
+    },
+    {
+      "from": "Tire",
+      "rel": "CÓ_BIẾN_THỂ",
+      "to": "TirePattern"
+    },
+    {
+      "from": "Tire",
+      "rel": "ĐẠT_CHUẨN",
+      "to": "QualityStandard"
+    },
+    {
+      "from": "Tube",
+      "rel": "DÙNG_VAN",
+      "to": "Van"
+    },
+    {
+      "from": "Tube",
+      "rel": "DÙNG_CHO",
+      "to": "Tire"
+    },
+    {
+      "from": "Brand",
+      "rel": "SẢN_XUẤT_SĂM",
+      "to": "Tube"
+    },
+    {
+      "from": "Company",
+      "rel": "CO_SP",
+      "to": "Tire"
+    }
+  ]
+}
