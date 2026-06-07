@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: faiss-backup
+spec:
+  schedule: "0 2 * * *" # daily at 02:00
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: faiss-backup
+              image: python:3.11-slim
+              command: ["/usr/local/bin/python", "-u", "/backup/faiss_backup_runner.py"]
+              env:
+                - name: FAISS_INDEX_PATH
+                  value: /app/data/faiss.index
+                - name: FAISS_META_PATH
+                  value: /app/data/faiss_meta.pkl
+                - name: FAISS_BACKUP_DIR
+                  value: /backups/faiss
+              volumeMounts:
+                - name: faiss-data
+                  mountPath: /app/data
+                - name: backup-storage
+                  mountPath: /backups
+                - name: backup-scripts
+                  mountPath: /backup
+          volumes:
+            - name: faiss-data
+              persistentVolumeClaim:
+                claimName: faiss-pvc
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: faiss-backup-pvc
+            - name: backup-scripts
+              configMap:
+                name: faiss-backup-scripts

@@ -1,0 +1,46 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: graph-rag-alerts
+  labels:
+    role: alert-rules
+spec:
+  groups:
+    - name: graph-rag.rules
+      rules:
+        - alert: HighPipelineLatency
+          expr: |
+            histogram_quantile(0.95, sum(rate(grag_pipeline_latency_seconds_bucket[5m])) by (le)) > 1.0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High 95th percentile pipeline latency"
+            description: "95th percentile pipeline latency > 1s for more than 5 minutes."
+
+        - alert: Neo4jQueryFailures
+          expr: increase(grag_neo4j_query_failures_total[5m]) > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Neo4j query failures detected"
+            description: "There have been Neo4j query failures in the last 5 minutes. Check Neo4j connectivity and query health."
+
+        - alert: HighLLMErrorRate
+          expr: rate(grag_llm_calls_total{success="false"}[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "LLM error calls increasing"
+            description: "Detected failed LLM calls in the last 5 minutes."
+
+        - alert: HighRequestErrorRate
+          expr: increase(grag_requests_total[5m]) > 0 and increase(grag_requests_total{endpoint!="/metrics"}[5m]) > 100
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Spike in requests detected"
+            description: "Significant increase in incoming requests; monitor for sudden traffic spikes or DDoS."

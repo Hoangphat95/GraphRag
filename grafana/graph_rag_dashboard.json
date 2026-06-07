@@ -1,0 +1,32 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": null,
+    "title": "Graph RAG - Overview",
+    "panels": [
+      {
+        "type": "graph",
+        "title": "Neo4j Query Latency (s)",
+        "targets": [
+          { "expr": "histogram_quantile(0.95, sum(rate(grag_query_latency_seconds_bucket[5m])) by (le))" }
+        ]
+      },
+      {
+        "type": "graph",
+        "title": "Neo4j Query Failures",
+        "targets": [
+          { "expr": "increase(grag_neo4j_query_failures_total[5m])" }
+        ]
+      },
+      {
+        "type": "graph",
+        "title": "Requests per endpoint",
+        "targets": [
+          { "expr": "sum by (endpoint) (rate(grag_requests_total[5m]))" }
+        ]
+      }
+    ],
+    "schemaVersion": 16
+  },
+  "overwrite": false
+}
