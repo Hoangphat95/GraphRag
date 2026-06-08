@@ -1,5 +1,0 @@
-*.pt
-*.pth
-*.bin
-__pycache__/
-.venv/

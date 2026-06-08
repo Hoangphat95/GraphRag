@@ -1,1 +1,39 @@
-*.pt
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environment ──────────────────────────────────────────────────────
+.venv/
+venv/
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+
+# ── Database ────────────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Generated / cache data (can be rebuilt from Neo4j) ──────────────────────
+*.npy
+*.pkl
+app/mapper/embeddings.npy
+app/mapper/value_store.pkl
+
+# ── IDE / Editor ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.stackdump
+
+graphrag_server.egg-info/
